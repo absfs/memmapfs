@@ -19,35 +19,72 @@ func (mf *MappedFile) mmap() error {
 		return fmt.Errorf("failed to get file descriptor: %w", err)
 	}
 
+	// Store fd for potential remapping
+	mf.fd = fd
+
 	// Determine protection and flags based on mode
 	prot, flags := mf.getProtectionFlags()
 
+	// Calculate map size based on windowing
+	mapSize := mf.size
+	mapOffset := int64(0)
+
+	if mf.windowSize > 0 {
+		// Using windowed mapping
+		mapOffset = mf.windowOffset
+		mapSize = mf.windowSize
+
+		// Don't map beyond end of file
+		if mapOffset+mapSize > mf.size {
+			mapSize = mf.size - mapOffset
+		}
+	}
+
+	// Ensure offset is page-aligned
+	pageSize := int64(unix.Getpagesize())
+	alignedOffset := (mapOffset / pageSize) * pageSize
+	offsetDiff := mapOffset - alignedOffset
+
+	// Adjust map size to account for alignment
+	adjustedMapSize := mapSize + offsetDiff
+
 	// Perform mmap
-	data, err := unix.Mmap(int(fd), 0, int(mf.size), prot, flags)
+	data, err := unix.Mmap(int(fd), alignedOffset, int(adjustedMapSize), prot, flags)
 	if err != nil {
 		return fmt.Errorf("mmap failed: %w", err)
 	}
 
-	mf.data = data
+	// Store the original mmap'd slice for munmap
+	mf.mmapData = data
+
+	// If we had to align, adjust the data slice to skip the alignment padding
+	if offsetDiff > 0 {
+		mf.data = data[offsetDiff:]
+	} else {
+		mf.data = data
+	}
+
 	return nil
 }
 
 // munmap unmaps the memory region.
 func (mf *MappedFile) munmap() error {
-	if mf.data == nil {
+	if mf.mmapData == nil {
 		return nil
 	}
 
-	if err := unix.Munmap(mf.data); err != nil {
+	// Unmap the original mmap'd slice, not the adjusted one
+	if err := unix.Munmap(mf.mmapData); err != nil {
 		return fmt.Errorf("munmap failed: %w", err)
 	}
 
+	mf.mmapData = nil
 	return nil
 }
 
 // msync synchronizes dirty pages to disk.
 func (mf *MappedFile) msync() error {
-	if mf.data == nil {
+	if mf.mmapData == nil {
 		return nil
 	}
 
@@ -61,7 +98,8 @@ func (mf *MappedFile) msync() error {
 		return nil
 	}
 
-	if err := unix.Msync(mf.data, flags); err != nil {
+	// Use the original mmap'd slice for msync
+	if err := unix.Msync(mf.mmapData, flags); err != nil {
 		return fmt.Errorf("msync failed: %w", err)
 	}
 
@@ -70,7 +108,7 @@ func (mf *MappedFile) msync() error {
 
 // preload provides hints to the OS to load pages into memory.
 func (mf *MappedFile) preload() error {
-	if mf.data == nil {
+	if mf.mmapData == nil {
 		return nil
 	}
 
@@ -80,7 +118,8 @@ func (mf *MappedFile) preload() error {
 		advice = unix.MADV_WILLNEED
 	}
 
-	if err := unix.Madvise(mf.data, advice); err != nil {
+	// Use the original mmap'd slice for madvise
+	if err := unix.Madvise(mf.mmapData, advice); err != nil {
 		return fmt.Errorf("madvise failed: %w", err)
 	}
 
@@ -177,11 +216,12 @@ func (mf *MappedFile) Advise(advice int) error {
 	mf.mu.RLock()
 	defer mf.mu.RUnlock()
 
-	if mf.data == nil {
+	if mf.mmapData == nil {
 		return ErrNotMapped
 	}
 
-	if err := unix.Madvise(mf.data, advice); err != nil {
+	// Use the original mmap'd slice for madvise
+	if err := unix.Madvise(mf.mmapData, advice); err != nil {
 		return fmt.Errorf("madvise failed: %w", err)
 	}
 
