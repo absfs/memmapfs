@@ -265,3 +265,146 @@ func ExampleNew_windowedWrite() {
 	fmt.Printf("Wrote to %d positions using windowed mapping\n", len(offsets))
 	// Output: Wrote to 3 positions using windowed mapping
 }
+
+// ExampleConfig_performanceTuning demonstrates performance tuning options.
+func ExampleConfig_performanceTuning() {
+	tmpDir, _ := os.MkdirTemp("", "memmapfs-example")
+	defer os.RemoveAll(tmpDir)
+
+	tmpFile := filepath.Join(tmpDir, "data.bin")
+	data := make([]byte, 5*1024*1024) // 5MB
+	os.WriteFile(tmpFile, data, 0644)
+
+	osFS, _ := osfs.NewFS()
+
+	// Configuration for maximum performance (database-like workload)
+	highPerfConfig := &memmapfs.Config{
+		Mode:          memmapfs.ModeReadWrite,
+		SyncMode:      memmapfs.SyncLazy,       // Sync only on close
+		PopulatePages: true,                    // Eagerly load all pages
+		MapFullFile:   true,                    // Map entire file
+		Preload:       false,                   // PopulatePages is more aggressive
+	}
+
+	mfs := memmapfs.New(osFS, highPerfConfig)
+	file, _ := mfs.OpenFile(tmpFile, os.O_RDWR, 0644)
+	defer file.Close()
+
+	// Access pattern hints for further optimization
+	if mf, ok := file.(*memmapfs.MappedFile); ok {
+		// Hint: random access pattern
+		mf.AdviseRandom()
+	}
+
+	fmt.Printf("File opened with high-performance configuration\n")
+	// Output: File opened with high-performance configuration
+}
+
+// ExampleConfig_memoryOptimized demonstrates memory-optimized configuration.
+func ExampleConfig_memoryOptimized() {
+	tmpDir, _ := os.MkdirTemp("", "memmapfs-example")
+	defer os.RemoveAll(tmpDir)
+
+	tmpFile := filepath.Join(tmpDir, "large.dat")
+	data := make([]byte, 100*1024*1024) // 100MB
+	os.WriteFile(tmpFile, data, 0644)
+
+	osFS, _ := osfs.NewFS()
+
+	// Configuration optimized for low memory usage
+	memOptConfig := &memmapfs.Config{
+		Mode:          memmapfs.ModeReadOnly,
+		SyncMode:      memmapfs.SyncNever,
+		PopulatePages: false,                   // Don't preload
+		MapFullFile:   false,                   // Use windowing
+		WindowSize:    10 * 1024 * 1024,        // 10MB window
+		Preload:       false,
+	}
+
+	mfs := memmapfs.New(osFS, memOptConfig)
+	file, _ := mfs.Open(tmpFile)
+	defer file.Close()
+
+	// Hint: sequential access to help OS optimize
+	if mf, ok := file.(*memmapfs.MappedFile); ok {
+		mf.AdviseSequential()
+	}
+
+	fmt.Printf("File opened with memory-optimized configuration\n")
+	// Output: File opened with memory-optimized configuration
+}
+
+// ExampleMappedFile_hugePages demonstrates using huge pages for large files.
+func ExampleMappedFile_hugePages() {
+	tmpDir, _ := os.MkdirTemp("", "memmapfs-example")
+	defer os.RemoveAll(tmpDir)
+
+	tmpFile := filepath.Join(tmpDir, "huge.dat")
+	// Create file >= 2MB (typical huge page size)
+	data := make([]byte, 4*1024*1024) // 4MB
+	os.WriteFile(tmpFile, data, 0644)
+
+	osFS, _ := osfs.NewFS()
+
+	// Try to use huge pages for better TLB performance
+	hugePagesConfig := &memmapfs.Config{
+		Mode:          memmapfs.ModeReadOnly,
+		UseHugePages:  true, // Request huge pages (Linux-specific)
+		PopulatePages: true, // Preload for immediate access
+	}
+
+	mfs := memmapfs.New(osFS, hugePagesConfig)
+	file, _ := mfs.Open(tmpFile)
+	if file != nil {
+		defer file.Close()
+
+		// Further hint to use transparent huge pages
+		if mf, ok := file.(*memmapfs.MappedFile); ok {
+			mf.AdviseHugePage()
+		}
+
+		fmt.Printf("File opened with huge pages support\n")
+	} else {
+		fmt.Printf("Huge pages not available (requires system configuration)\n")
+	}
+	// Output: File opened with huge pages support
+}
+
+// ExampleMappedFile_accessPatterns demonstrates access pattern optimization.
+func ExampleMappedFile_accessPatterns() {
+	tmpDir, _ := os.MkdirTemp("", "memmapfs-example")
+	defer os.RemoveAll(tmpDir)
+
+	tmpFile := filepath.Join(tmpDir, "data.bin")
+	data := make([]byte, 10*1024*1024) // 10MB
+	os.WriteFile(tmpFile, data, 0644)
+
+	osFS, _ := osfs.NewFS()
+	mfs := memmapfs.New(osFS, memmapfs.DefaultConfig())
+
+	file, _ := mfs.Open(tmpFile)
+	defer file.Close()
+
+	mf, _ := file.(*memmapfs.MappedFile)
+
+	// Example 1: Sequential scan
+	mf.AdviseSequential() // OS can readahead aggressively
+	buf := make([]byte, 4096)
+	for i := 0; i < 100; i++ {
+		file.Read(buf)
+	}
+
+	// Example 2: Random access
+	file.Seek(0, io.SeekStart)
+	mf.AdviseRandom() // OS disables readahead
+	offsets := []int64{1000, 50000, 10000, 80000}
+	for _, offset := range offsets {
+		file.ReadAt(buf, offset)
+	}
+
+	// Example 3: Done with data
+	mf.AdviseDontNeed() // Allow OS to reclaim pages
+
+	fmt.Printf("Applied access pattern hints\n")
+	// Output: Applied access pattern hints
+}

@@ -59,6 +59,16 @@ type Config struct {
 
 	// PreloadAsync performs preload asynchronously
 	PreloadAsync bool
+
+	// PopulatePages uses MAP_POPULATE to eagerly load pages (Linux-specific)
+	// This prefaults page tables, loading file contents into RAM immediately
+	// More aggressive than Preload which uses madvise hints
+	PopulatePages bool
+
+	// UseHugePages attempts to use huge pages (MAP_HUGETLB on Linux)
+	// Requires system configuration and may fail if huge pages unavailable
+	// Can significantly improve TLB performance for large files
+	UseHugePages bool
 }
 
 // DefaultConfig returns a configuration suitable for most use cases.
