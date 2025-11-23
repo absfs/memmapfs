@@ -237,8 +237,9 @@ var _ absfs.FileSystem = (*MemMapFS)(nil)
 
 // Common errors
 var (
-	ErrNotMapped     = errors.New("file is not memory-mapped")
-	ErrInvalidOffset = errors.New("invalid offset")
-	ErrInvalidWhence = errors.New("invalid whence")
+	ErrNotMapped          = errors.New("file is not memory-mapped")
+	ErrInvalidOffset      = errors.New("invalid offset")
+	ErrInvalidWhence      = errors.New("invalid whence")
 	ErrWriteToReadOnlyMap = errors.New("cannot write to read-only mapping")
+	ErrSIGBUS             = errors.New("SIGBUS signal received: possible file truncation or I/O error")
 )
