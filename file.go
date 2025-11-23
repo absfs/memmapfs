@@ -21,7 +21,8 @@ type MappedFile struct {
 	position int64  // Current read/write position
 
 	// Configuration
-	config *Config
+	config      *Config
+	syncManager *syncManager // For periodic sync
 
 	// State
 	modified bool         // Track if writes occurred
@@ -29,14 +30,14 @@ type MappedFile struct {
 }
 
 // newMappedFile creates a new memory-mapped file.
-// This function is platform-specific and implemented in mmap_unix.go or mmap_windows.go
-func newMappedFile(file absfs.File, config *Config, size int64) (*MappedFile, error) {
+func newMappedFile(file absfs.File, config *Config, size int64, syncManager *syncManager) (*MappedFile, error) {
 	mf := &MappedFile{
-		file:     file,
-		size:     size,
-		position: 0,
-		config:   config,
-		modified: false,
+		file:        file,
+		size:        size,
+		position:    0,
+		config:      config,
+		syncManager: syncManager,
+		modified:    false,
 	}
 
 	// Perform platform-specific mmap
@@ -50,6 +51,11 @@ func newMappedFile(file absfs.File, config *Config, size int64) (*MappedFile, er
 			// Preload is a hint, don't fail on error
 			_ = err
 		}
+	}
+
+	// Register with sync manager for periodic sync
+	if syncManager != nil && config.SyncMode == SyncPeriodic {
+		syncManager.register(mf)
 	}
 
 	return mf, nil
@@ -103,33 +109,77 @@ func (mf *MappedFile) ReadAt(p []byte, off int64) (int, error) {
 }
 
 // Write writes data to the mapped memory.
-// For Phase 1 (read-only), this returns an error.
 func (mf *MappedFile) Write(p []byte) (int, error) {
 	mf.mu.Lock()
 	defer mf.mu.Unlock()
 
-	// Phase 1: Read-only support only
-	if mf.data != nil && mf.config.Mode == ModeReadOnly {
+	// If not mapped, delegate to underlying file
+	if mf.data == nil {
+		return mf.file.Write(p)
+	}
+
+	// Check if read-only
+	if mf.config.Mode == ModeReadOnly {
 		return 0, ErrWriteToReadOnlyMap
 	}
 
-	// For non-mapped files or future read-write support
-	return mf.file.Write(p)
+	// Check if write would exceed mapped region
+	if mf.position+int64(len(p)) > int64(len(mf.data)) {
+		return 0, io.ErrShortWrite
+	}
+
+	// Direct memory copy to mapped region
+	n := copy(mf.data[mf.position:], p)
+	mf.position += int64(n)
+	mf.modified = true
+
+	// Sync based on mode
+	if mf.config.SyncMode == SyncImmediate {
+		if err := mf.syncLocked(); err != nil {
+			return n, err
+		}
+	}
+
+	return n, nil
 }
 
 // WriteAt writes data at a specific offset.
-// For Phase 1 (read-only), this returns an error.
 func (mf *MappedFile) WriteAt(p []byte, off int64) (int, error) {
 	mf.mu.Lock()
 	defer mf.mu.Unlock()
 
-	// Phase 1: Read-only support only
-	if mf.data != nil && mf.config.Mode == ModeReadOnly {
+	// If not mapped, delegate to underlying file
+	if mf.data == nil {
+		return mf.file.WriteAt(p, off)
+	}
+
+	// Check if read-only
+	if mf.config.Mode == ModeReadOnly {
 		return 0, ErrWriteToReadOnlyMap
 	}
 
-	// For non-mapped files or future read-write support
-	return mf.file.WriteAt(p, off)
+	// Validate offset
+	if off < 0 || off >= int64(len(mf.data)) {
+		return 0, ErrInvalidOffset
+	}
+
+	// Check if write would exceed mapped region
+	if off+int64(len(p)) > int64(len(mf.data)) {
+		return 0, io.ErrShortWrite
+	}
+
+	// Direct memory copy to mapped region at offset
+	n := copy(mf.data[off:], p)
+	mf.modified = true
+
+	// Sync based on mode
+	if mf.config.SyncMode == SyncImmediate {
+		if err := mf.syncLocked(); err != nil {
+			return n, err
+		}
+	}
+
+	return n, nil
 }
 
 // Seek sets the file position for the next Read or Write.
@@ -169,10 +219,24 @@ func (mf *MappedFile) Close() error {
 
 	var err error
 
+	// Unregister from sync manager
+	if mf.syncManager != nil {
+		mf.syncManager.unregister(mf)
+	}
+
+	// Sync if modified
+	if mf.modified && mf.data != nil {
+		if syncErr := mf.syncLocked(); syncErr != nil {
+			err = syncErr
+		}
+	}
+
 	// Unmap memory if mapped
 	if mf.data != nil {
 		if unmapErr := mf.munmap(); unmapErr != nil {
-			err = unmapErr
+			if err == nil {
+				err = unmapErr
+			}
 		}
 		mf.data = nil
 	}
@@ -198,12 +262,22 @@ func (mf *MappedFile) Sync() error {
 	mf.mu.Lock()
 	defer mf.mu.Unlock()
 
+	return mf.syncLocked()
+}
+
+// syncLocked performs sync without acquiring the lock (caller must hold lock).
+func (mf *MappedFile) syncLocked() error {
 	if mf.data == nil {
 		return mf.file.Sync()
 	}
 
 	// For read-only mappings, no sync needed
 	if mf.config.Mode == ModeReadOnly {
+		return nil
+	}
+
+	// Only sync if modified
+	if !mf.modified {
 		return nil
 	}
 
@@ -237,18 +311,8 @@ func (mf *MappedFile) Readdirnames(n int) ([]string, error) {
 }
 
 // WriteString writes a string to the file.
-// For Phase 1 (read-only), this returns an error for mapped files.
 func (mf *MappedFile) WriteString(s string) (int, error) {
-	mf.mu.Lock()
-	defer mf.mu.Unlock()
-
-	// Phase 1: Read-only support only
-	if mf.data != nil && mf.config.Mode == ModeReadOnly {
-		return 0, ErrWriteToReadOnlyMap
-	}
-
-	// For non-mapped files or future read-write support
-	return mf.file.WriteString(s)
+	return mf.Write([]byte(s))
 }
 
 // Ensure MappedFile implements absfs.File

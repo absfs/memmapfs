@@ -69,8 +69,9 @@ func DefaultConfig() *Config {
 
 // MemMapFS wraps an existing filesystem and provides memory-mapped file access.
 type MemMapFS struct {
-	underlying absfs.FileSystem
-	config     *Config
+	underlying  absfs.FileSystem
+	config      *Config
+	syncManager *syncManager
 }
 
 // New creates a new memory-mapped filesystem wrapper.
@@ -79,10 +80,18 @@ func New(underlying absfs.FileSystem, config *Config) *MemMapFS {
 	if config == nil {
 		config = DefaultConfig()
 	}
-	return &MemMapFS{
+
+	mfs := &MemMapFS{
 		underlying: underlying,
 		config:     config,
 	}
+
+	// Initialize periodic sync manager if needed
+	if config.SyncMode == SyncPeriodic && config.SyncInterval > 0 {
+		mfs.syncManager = newSyncManager(config.SyncInterval)
+	}
+
+	return mfs
 }
 
 // Open opens a file for reading and maps it into memory.
@@ -118,7 +127,7 @@ func (mfs *MemMapFS) OpenFile(name string, flag int, perm os.FileMode) (absfs.Fi
 	}
 
 	// Create mapped file
-	mf, err := newMappedFile(file, mfs.config, size)
+	mf, err := newMappedFile(file, mfs.config, size, mfs.syncManager)
 	if err != nil {
 		file.Close()
 		return nil, err
