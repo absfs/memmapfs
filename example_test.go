@@ -408,3 +408,134 @@ func ExampleMappedFile_accessPatterns() {
 	fmt.Printf("Applied access pattern hints\n")
 	// Output: Applied access pattern hints
 }
+
+// ExampleSharedMemory_basic demonstrates basic shared memory usage.
+func ExampleSharedMemory_basic() {
+	tmpDir, _ := os.MkdirTemp("", "memmapfs-example")
+	defer os.RemoveAll(tmpDir)
+
+	sharedPath := filepath.Join(tmpDir, "shared.dat")
+
+	// Create shared memory region
+	config := &memmapfs.SharedMemoryConfig{
+		Path:        sharedPath,
+		Size:        1024,           // 1KB
+		Mode:        memmapfs.ModeReadWrite,
+		SyncMode:    memmapfs.SyncImmediate,
+		Permissions: 0644,
+	}
+
+	sm, _ := memmapfs.CreateSharedMemory(config)
+	defer sm.Close()
+
+	// Write data to shared memory
+	data := sm.Data()
+	copy(data, []byte("Hello from process A"))
+
+	// Sync to ensure data is visible
+	sm.Sync()
+
+	// Another process could now open and read this data
+	fmt.Printf("Created shared memory with size %d bytes\n", sm.Size())
+	// Output: Created shared memory with size 1024 bytes
+}
+
+// ExampleSharedMemory_ipc demonstrates inter-process communication.
+func ExampleSharedMemory_ipc() {
+	tmpDir, _ := os.MkdirTemp("", "memmapfs-example")
+	defer os.RemoveAll(tmpDir)
+
+	sharedPath := filepath.Join(tmpDir, "ipc.dat")
+
+	// Process A: Create and write
+	config := &memmapfs.SharedMemoryConfig{
+		Path:          sharedPath,
+		Size:          4096,
+		Mode:          memmapfs.ModeReadWrite,
+		PopulatePages: true,
+	}
+
+	writer, _ := memmapfs.CreateSharedMemory(config)
+
+	// Write message
+	message := []byte("Message from process A")
+	copy(writer.Data(), message)
+	writer.Sync()
+	writer.Close()
+
+	// Process B: Open and read
+	reader, _ := memmapfs.OpenSharedMemory(sharedPath, false)
+
+	// Read message
+	received := make([]byte, len(message))
+	copy(received, reader.Data())
+
+	fmt.Printf("Received: %s\n", string(received))
+	reader.Close()
+
+	// Output: Received: Message from process A
+}
+
+// ExampleSharedMemory_cleanup demonstrates proper cleanup.
+func ExampleSharedMemory_cleanup() {
+	tmpDir, _ := os.MkdirTemp("", "memmapfs-example")
+	defer os.RemoveAll(tmpDir)
+
+	sharedPath := filepath.Join(tmpDir, "temp.dat")
+
+	config := &memmapfs.SharedMemoryConfig{
+		Path: sharedPath,
+		Size: 1024,
+	}
+
+	sm, _ := memmapfs.CreateSharedMemory(config)
+
+	// Use shared memory...
+	copy(sm.Data(), []byte("temporary data"))
+
+	// Clean up: close and remove
+	sm.Remove()
+
+	// Verify file is gone
+	_, err := os.Stat(sharedPath)
+	if os.IsNotExist(err) {
+		fmt.Printf("Shared memory cleaned up successfully\n")
+	}
+	// Output: Shared memory cleaned up successfully
+}
+
+// ExampleSIGBUSHandler demonstrates SIGBUS protection.
+func ExampleSIGBUSHandler() {
+	tmpDir, _ := os.MkdirTemp("", "memmapfs-example")
+	defer os.RemoveAll(tmpDir)
+
+	tmpFile := filepath.Join(tmpDir, "protected.dat")
+	data := make([]byte, 1024)
+	os.WriteFile(tmpFile, data, 0644)
+
+	osFS, _ := osfs.NewFS()
+	mfs := memmapfs.New(osFS, memmapfs.DefaultConfig())
+
+	file, _ := mfs.Open(tmpFile)
+	mf := file.(*memmapfs.MappedFile)
+
+	// Enable SIGBUS protection
+	mf.EnableSIGBUSProtection()
+
+	// Register a recovery handler
+	handler := memmapfs.GetSIGBUSHandler()
+	handler.OnSIGBUS(func(mappedFile *memmapfs.MappedFile, err error) {
+		fmt.Printf("SIGBUS detected, attempting recovery...\n")
+		// Attempt to remap after truncation
+		mappedFile.RemapAfterTruncation()
+	})
+
+	// Use the file...
+	// If the file is truncated externally, the handler will be called
+
+	mf.DisableSIGBUSProtection()
+	file.Close()
+
+	fmt.Printf("SIGBUS protection enabled\n")
+	// Output: SIGBUS protection enabled
+}
