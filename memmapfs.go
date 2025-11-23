@@ -47,7 +47,12 @@ type Config struct {
 	SyncInterval time.Duration
 
 	// MapFullFile determines whether to map the entire file at once
+	// If false, WindowSize is used for windowed mapping
 	MapFullFile bool
+
+	// WindowSize specifies the size of the mapping window for large files
+	// Only used when MapFullFile is false. If 0, defaults to 1GB.
+	WindowSize int64
 
 	// Preload hints that pages should be loaded immediately
 	Preload bool

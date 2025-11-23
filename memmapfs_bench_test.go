@@ -681,3 +681,295 @@ func BenchmarkSyncModes(b *testing.B) {
 		})
 	}
 }
+// BenchmarkWindowedSequentialRead benchmarks sequential reading with windowed mapping.
+func BenchmarkWindowedSequentialRead(b *testing.B) {
+	// Use a file larger than the window size
+	fileSize := 16 * 1024 * 1024 // 16 MB
+	windowSize := int64(4 * 1024 * 1024) // 4 MB window
+
+	tmpFile, cleanup := setupBenchmarkFile(b, fileSize)
+	defer cleanup()
+
+	osFS, err := osfs.NewFS()
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	b.Run("FullFile", func(b *testing.B) {
+		config := &Config{
+			Mode:        ModeReadOnly,
+			SyncMode:    SyncNever,
+			MapFullFile: true,
+		}
+		mfs := New(osFS, config)
+
+		file, err := mfs.Open(tmpFile)
+		if err != nil {
+			b.Fatal(err)
+		}
+		defer file.Close()
+
+		buf := make([]byte, 4096)
+		b.ResetTimer()
+		b.SetBytes(int64(fileSize))
+
+		for i := 0; i < b.N; i++ {
+			file.Seek(0, io.SeekStart)
+			bytesRead := 0
+			for bytesRead < fileSize {
+				n, err := file.Read(buf)
+				if err != nil && err != io.EOF {
+					b.Fatal(err)
+				}
+				bytesRead += n
+				if err == io.EOF {
+					break
+				}
+			}
+		}
+	})
+
+	b.Run("Windowed", func(b *testing.B) {
+		config := &Config{
+			Mode:        ModeReadOnly,
+			SyncMode:    SyncNever,
+			MapFullFile: false,
+			WindowSize:  windowSize,
+		}
+		mfs := New(osFS, config)
+
+		file, err := mfs.Open(tmpFile)
+		if err != nil {
+			b.Fatal(err)
+		}
+		defer file.Close()
+
+		buf := make([]byte, 4096)
+		b.ResetTimer()
+		b.SetBytes(int64(fileSize))
+
+		for i := 0; i < b.N; i++ {
+			file.Seek(0, io.SeekStart)
+			bytesRead := 0
+			for bytesRead < fileSize {
+				n, err := file.Read(buf)
+				if err != nil && err != io.EOF {
+					b.Fatal(err)
+				}
+				bytesRead += n
+				if err == io.EOF {
+					break
+				}
+			}
+		}
+	})
+}
+
+// BenchmarkWindowedRandomRead benchmarks random access with windowed mapping.
+func BenchmarkWindowedRandomRead(b *testing.B) {
+	fileSize := 16 * 1024 * 1024 // 16 MB
+	windowSize := int64(4 * 1024 * 1024) // 4 MB window
+
+	tmpFile, cleanup := setupBenchmarkFile(b, fileSize)
+	defer cleanup()
+
+	osFS, err := osfs.NewFS()
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	// Pre-generate random offsets
+	numReads := 1000
+	offsets := make([]int64, numReads)
+	for i := range offsets {
+		offsets[i] = int64((i * 7919) % (fileSize - 4096))
+	}
+
+	b.Run("FullFile", func(b *testing.B) {
+		config := &Config{
+			Mode:        ModeReadOnly,
+			SyncMode:    SyncNever,
+			MapFullFile: true,
+		}
+		mfs := New(osFS, config)
+
+		file, err := mfs.Open(tmpFile)
+		if err != nil {
+			b.Fatal(err)
+		}
+		defer file.Close()
+
+		buf := make([]byte, 4096)
+		b.ResetTimer()
+		b.SetBytes(4096 * int64(numReads))
+
+		for i := 0; i < b.N; i++ {
+			for _, offset := range offsets {
+				_, err := file.ReadAt(buf, offset)
+				if err != nil && err != io.EOF {
+					b.Fatal(err)
+				}
+			}
+		}
+	})
+
+	b.Run("Windowed", func(b *testing.B) {
+		config := &Config{
+			Mode:        ModeReadOnly,
+			SyncMode:    SyncNever,
+			MapFullFile: false,
+			WindowSize:  windowSize,
+		}
+		mfs := New(osFS, config)
+
+		file, err := mfs.Open(tmpFile)
+		if err != nil {
+			b.Fatal(err)
+		}
+		defer file.Close()
+
+		buf := make([]byte, 4096)
+		b.ResetTimer()
+		b.SetBytes(4096 * int64(numReads))
+
+		for i := 0; i < b.N; i++ {
+			for _, offset := range offsets {
+				_, err := file.ReadAt(buf, offset)
+				if err != nil && err != io.EOF {
+					b.Fatal(err)
+				}
+			}
+		}
+	})
+}
+
+// BenchmarkWindowedWrite benchmarks writing with windowed mapping.
+func BenchmarkWindowedWrite(b *testing.B) {
+	fileSize := 16 * 1024 * 1024 // 16 MB
+	windowSize := int64(4 * 1024 * 1024) // 4 MB window
+
+	tmpFile, cleanup := setupBenchmarkFile(b, fileSize)
+	defer cleanup()
+
+	osFS, err := osfs.NewFS()
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	data := make([]byte, 4096)
+	for i := range data {
+		data[i] = byte(i % 256)
+	}
+
+	b.Run("FullFile", func(b *testing.B) {
+		config := &Config{
+			Mode:        ModeReadWrite,
+			SyncMode:    SyncLazy,
+			MapFullFile: true,
+		}
+		mfs := New(osFS, config)
+
+		b.ResetTimer()
+		b.SetBytes(4096)
+
+		for i := 0; i < b.N; i++ {
+			file, err := mfs.OpenFile(tmpFile, os.O_RDWR, 0644)
+			if err != nil {
+				b.Fatal(err)
+			}
+
+			offset := int64((i * 7919) % (fileSize - 4096))
+			_, err = file.WriteAt(data, offset)
+			if err != nil {
+				b.Fatal(err)
+			}
+
+			file.Close()
+		}
+	})
+
+	b.Run("Windowed", func(b *testing.B) {
+		config := &Config{
+			Mode:        ModeReadWrite,
+			SyncMode:    SyncLazy,
+			MapFullFile: false,
+			WindowSize:  windowSize,
+		}
+		mfs := New(osFS, config)
+
+		b.ResetTimer()
+		b.SetBytes(4096)
+
+		for i := 0; i < b.N; i++ {
+			file, err := mfs.OpenFile(tmpFile, os.O_RDWR, 0644)
+			if err != nil {
+				b.Fatal(err)
+			}
+
+			offset := int64((i * 7919) % (fileSize - 4096))
+			_, err = file.WriteAt(data, offset)
+			if err != nil {
+				b.Fatal(err)
+			}
+
+			file.Close()
+		}
+	})
+}
+
+// BenchmarkWindowSize benchmarks different window sizes for sequential access.
+func BenchmarkWindowSize(b *testing.B) {
+	fileSize := 16 * 1024 * 1024 // 16 MB
+
+	tmpFile, cleanup := setupBenchmarkFile(b, fileSize)
+	defer cleanup()
+
+	osFS, err := osfs.NewFS()
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	windowSizes := []int64{
+		1 * 1024 * 1024,  // 1 MB
+		4 * 1024 * 1024,  // 4 MB
+		8 * 1024 * 1024,  // 8 MB
+		16 * 1024 * 1024, // 16 MB (full file)
+	}
+
+	for _, windowSize := range windowSizes {
+		b.Run(formatSize(int(windowSize)), func(b *testing.B) {
+			config := &Config{
+				Mode:        ModeReadOnly,
+				SyncMode:    SyncNever,
+				MapFullFile: false,
+				WindowSize:  windowSize,
+			}
+			mfs := New(osFS, config)
+
+			file, err := mfs.Open(tmpFile)
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer file.Close()
+
+			buf := make([]byte, 4096)
+			b.ResetTimer()
+			b.SetBytes(int64(fileSize))
+
+			for i := 0; i < b.N; i++ {
+				file.Seek(0, io.SeekStart)
+				bytesRead := 0
+				for bytesRead < fileSize {
+					n, err := file.Read(buf)
+					if err != nil && err != io.EOF {
+						b.Fatal(err)
+					}
+					bytesRead += n
+					if err == io.EOF {
+						break
+					}
+				}
+			}
+		})
+	}
+}

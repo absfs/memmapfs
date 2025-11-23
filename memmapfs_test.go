@@ -801,3 +801,341 @@ func TestCopyOnWrite(t *testing.T) {
 		t.Logf("Note: File was modified (COW may have been written with explicit sync)")
 	}
 }
+
+// TestWindowedMapping tests reading from a file with windowed mapping.
+func TestWindowedMapping(t *testing.T) {
+	// Create a file larger than our test window size
+	windowSize := int64(1024) // 1KB window
+	fileSize := windowSize * 3 // 3KB file
+
+	content := make([]byte, fileSize)
+	for i := range content {
+		content[i] = byte(i % 256)
+	}
+
+	tmpFile, cleanup := createTestFile(t, string(content))
+	defer cleanup()
+
+	osFS, err := osfs.NewFS()
+	if err != nil {
+		t.Fatalf("NewFS() failed: %v", err)
+	}
+	config := &Config{
+		Mode:        ModeReadOnly,
+		SyncMode:    SyncNever,
+		MapFullFile: false,
+		WindowSize:  windowSize,
+	}
+	mfs := New(osFS, config)
+
+	file, err := mfs.Open(tmpFile)
+	if err != nil {
+		t.Fatalf("Open() failed: %v", err)
+	}
+	defer file.Close()
+
+	// Read in chunks that cross window boundaries
+	chunkSize := 512
+	buf := make([]byte, chunkSize)
+	totalRead := 0
+
+	for totalRead < len(content) {
+		n, err := file.Read(buf)
+		if err != nil && err != io.EOF {
+			t.Fatalf("Read() at offset %d failed: %v", totalRead, err)
+		}
+
+		// Verify data
+		for i := 0; i < n; i++ {
+			expected := byte((totalRead + i) % 256)
+			if buf[i] != expected {
+				t.Errorf("At offset %d: expected %d, got %d", totalRead+i, expected, buf[i])
+			}
+		}
+
+		totalRead += n
+
+		if err == io.EOF {
+			break
+		}
+	}
+
+	if totalRead != len(content) {
+		t.Errorf("Expected to read %d bytes, got %d", len(content), totalRead)
+	}
+}
+
+// TestWindowedSeek tests seeking with windowed mapping.
+func TestWindowedSeek(t *testing.T) {
+	windowSize := int64(1024)
+	fileSize := windowSize * 4
+
+	content := make([]byte, fileSize)
+	for i := range content {
+		content[i] = byte(i % 256)
+	}
+
+	tmpFile, cleanup := createTestFile(t, string(content))
+	defer cleanup()
+
+	osFS, err := osfs.NewFS()
+	if err != nil {
+		t.Fatalf("NewFS() failed: %v", err)
+	}
+	config := &Config{
+		Mode:        ModeReadOnly,
+		SyncMode:    SyncNever,
+		MapFullFile: false,
+		WindowSize:  windowSize,
+	}
+	mfs := New(osFS, config)
+
+	file, err := mfs.Open(tmpFile)
+	if err != nil {
+		t.Fatalf("Open() failed: %v", err)
+	}
+	defer file.Close()
+
+	// Seek to different windows and read
+	testOffsets := []int64{
+		0,                    // First window
+		windowSize,           // Second window
+		windowSize * 2,       // Third window
+		windowSize*3 - 100,   // Near end
+		windowSize / 2,       // Back to first window
+	}
+
+	buf := make([]byte, 100)
+	for _, offset := range testOffsets {
+		pos, err := file.Seek(offset, io.SeekStart)
+		if err != nil {
+			t.Fatalf("Seek(%d) failed: %v", offset, err)
+		}
+
+		if pos != offset {
+			t.Errorf("Seek returned %d, expected %d", pos, offset)
+		}
+
+		n, err := file.Read(buf)
+		if err != nil && err != io.EOF {
+			t.Fatalf("Read() after Seek(%d) failed: %v", offset, err)
+		}
+
+		// Verify data
+		for i := 0; i < n; i++ {
+			expected := byte((offset + int64(i)) % 256)
+			if buf[i] != expected {
+				t.Errorf("At offset %d: expected %d, got %d", offset+int64(i), expected, buf[i])
+			}
+		}
+	}
+}
+
+// TestWindowedReadAt tests ReadAt with windowed mapping.
+func TestWindowedReadAt(t *testing.T) {
+	windowSize := int64(1024)
+	fileSize := windowSize * 3
+
+	content := make([]byte, fileSize)
+	for i := range content {
+		content[i] = byte(i % 256)
+	}
+
+	tmpFile, cleanup := createTestFile(t, string(content))
+	defer cleanup()
+
+	osFS, err := osfs.NewFS()
+	if err != nil {
+		t.Fatalf("NewFS() failed: %v", err)
+	}
+	config := &Config{
+		Mode:        ModeReadOnly,
+		SyncMode:    SyncNever,
+		MapFullFile: false,
+		WindowSize:  windowSize,
+	}
+	mfs := New(osFS, config)
+
+	file, err := mfs.Open(tmpFile)
+	if err != nil {
+		t.Fatalf("Open() failed: %v", err)
+	}
+	defer file.Close()
+
+	// ReadAt from different windows
+	testCases := []struct {
+		offset int64
+		size   int
+	}{
+		{0, 100},                     // First window
+		{windowSize - 100, 50},       // Near end of first window (doesn't cross)
+		{windowSize, 100},            // Second window
+		{windowSize + 100, 200},      // Middle of second window
+		{windowSize*2 + 500, 100},    // Third window
+	}
+
+	for _, tc := range testCases {
+		buf := make([]byte, tc.size)
+		n, err := file.ReadAt(buf, tc.offset)
+
+		// Check if we're reading past EOF
+		expectedN := tc.size
+		if tc.offset+int64(tc.size) > fileSize {
+			expectedN = int(fileSize - tc.offset)
+			if err != io.EOF {
+				t.Errorf("ReadAt(%d, %d) should return EOF, got %v", tc.offset, tc.size, err)
+			}
+		} else if err != nil {
+			t.Errorf("ReadAt(%d, %d) failed: %v", tc.offset, tc.size, err)
+		}
+
+		if n != expectedN {
+			t.Errorf("ReadAt(%d, %d) returned %d bytes, expected %d", tc.offset, tc.size, n, expectedN)
+		}
+
+		// Verify data
+		for i := 0; i < n; i++ {
+			expected := byte((tc.offset + int64(i)) % 256)
+			if buf[i] != expected {
+				t.Errorf("ReadAt offset %d: at position %d expected %d, got %d", tc.offset, i, expected, buf[i])
+			}
+		}
+	}
+}
+
+// TestWindowedWrite tests writing with windowed mapping.
+func TestWindowedWrite(t *testing.T) {
+	windowSize := int64(1024)
+	fileSize := windowSize * 3
+
+	content := make([]byte, fileSize)
+	for i := range content {
+		content[i] = byte(i % 256)
+	}
+
+	tmpFile, cleanup := createTestFile(t, string(content))
+	defer cleanup()
+
+	osFS, err := osfs.NewFS()
+	if err != nil {
+		t.Fatalf("NewFS() failed: %v", err)
+	}
+	config := &Config{
+		Mode:        ModeReadWrite,
+		SyncMode:    SyncImmediate,
+		MapFullFile: false,
+		WindowSize:  windowSize,
+	}
+	mfs := New(osFS, config)
+
+	file, err := mfs.OpenFile(tmpFile, os.O_RDWR, 0644)
+	if err != nil {
+		t.Fatalf("OpenFile() failed: %v", err)
+	}
+	defer file.Close()
+
+	// Write to different windows
+	testPattern := []byte("WINDOWED")
+	testOffsets := []int64{
+		100,                 // First window
+		windowSize + 50,     // Second window
+		windowSize*2 + 100,  // Third window
+	}
+
+	for _, offset := range testOffsets {
+		_, err := file.Seek(offset, io.SeekStart)
+		if err != nil {
+			t.Fatalf("Seek(%d) failed: %v", offset, err)
+		}
+
+		n, err := file.Write(testPattern)
+		if err != nil {
+			t.Fatalf("Write() at offset %d failed: %v", offset, err)
+		}
+
+		if n != len(testPattern) {
+			t.Errorf("Write() at offset %d: wrote %d bytes, expected %d", offset, n, len(testPattern))
+		}
+	}
+
+	// Verify writes by reading back
+	for _, offset := range testOffsets {
+		buf := make([]byte, len(testPattern))
+		n, err := file.ReadAt(buf, offset)
+		if err != nil && err != io.EOF {
+			t.Fatalf("ReadAt(%d) failed: %v", offset, err)
+		}
+
+		if n != len(testPattern) {
+			t.Errorf("ReadAt(%d): read %d bytes, expected %d", offset, n, len(testPattern))
+		}
+
+		if string(buf) != string(testPattern) {
+			t.Errorf("ReadAt(%d): expected %q, got %q", offset, testPattern, buf)
+		}
+	}
+}
+
+// TestWindowedWriteAt tests WriteAt with windowed mapping.
+func TestWindowedWriteAt(t *testing.T) {
+	windowSize := int64(1024)
+	fileSize := windowSize * 3
+
+	content := make([]byte, fileSize)
+	tmpFile, cleanup := createTestFile(t, string(content))
+	defer cleanup()
+
+	osFS, err := osfs.NewFS()
+	if err != nil {
+		t.Fatalf("NewFS() failed: %v", err)
+	}
+	config := &Config{
+		Mode:        ModeReadWrite,
+		SyncMode:    SyncImmediate,
+		MapFullFile: false,
+		WindowSize:  windowSize,
+	}
+	mfs := New(osFS, config)
+
+	file, err := mfs.OpenFile(tmpFile, os.O_RDWR, 0644)
+	if err != nil {
+		t.Fatalf("OpenFile() failed: %v", err)
+	}
+	defer file.Close()
+
+	// WriteAt to different windows
+	testPattern := []byte("WRITEAT")
+	testOffsets := []int64{
+		200,
+		windowSize + 100,
+		windowSize*2 + 200,
+	}
+
+	for _, offset := range testOffsets {
+		n, err := file.WriteAt(testPattern, offset)
+		if err != nil {
+			t.Fatalf("WriteAt(%d) failed: %v", offset, err)
+		}
+
+		if n != len(testPattern) {
+			t.Errorf("WriteAt(%d): wrote %d bytes, expected %d", offset, n, len(testPattern))
+		}
+	}
+
+	// Verify all writes
+	for _, offset := range testOffsets {
+		buf := make([]byte, len(testPattern))
+		n, err := file.ReadAt(buf, offset)
+		if err != nil && err != io.EOF {
+			t.Fatalf("ReadAt(%d) failed: %v", offset, err)
+		}
+
+		if n != len(testPattern) {
+			t.Errorf("ReadAt(%d): read %d bytes, expected %d", offset, n, len(testPattern))
+		}
+
+		if string(buf) != string(testPattern) {
+			t.Errorf("ReadAt(%d): expected %q, got %q", offset, testPattern, buf)
+		}
+	}
+}
