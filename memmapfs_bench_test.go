@@ -424,3 +424,260 @@ func formatSize(size int) string {
 		return fmt.Sprintf("%dB", size)
 	}
 }
+
+// BenchmarkWrite compares write performance.
+func BenchmarkWrite(b *testing.B) {
+	sizes := []int{
+		4 * 1024,       // 4 KB
+		64 * 1024,      // 64 KB
+		1024 * 1024,    // 1 MB
+		16 * 1024 * 1024, // 16 MB
+	}
+
+	for _, size := range sizes {
+		b.Run(formatSize(size), func(b *testing.B) {
+			b.Run("Standard", func(b *testing.B) {
+				benchmarkStandardWrite(b, size)
+			})
+			b.Run("MemMap", func(b *testing.B) {
+				benchmarkMemMapWrite(b, size)
+			})
+		})
+	}
+}
+
+func benchmarkStandardWrite(b *testing.B, size int) {
+	tmpDir := b.TempDir()
+	tmpFile := filepath.Join(tmpDir, "benchmark.dat")
+
+	// Create initial file
+	initialData := make([]byte, size)
+	if err := os.WriteFile(tmpFile, initialData, 0644); err != nil {
+		b.Fatal(err)
+	}
+
+	data := make([]byte, 4096)
+	for i := range data {
+		data[i] = byte(i % 256)
+	}
+
+	b.ResetTimer()
+	b.SetBytes(4096)
+
+	for i := 0; i < b.N; i++ {
+		file, err := os.OpenFile(tmpFile, os.O_RDWR, 0644)
+		if err != nil {
+			b.Fatal(err)
+		}
+
+		_, err = file.Write(data)
+		if err != nil {
+			b.Fatal(err)
+		}
+
+		file.Close()
+	}
+}
+
+func benchmarkMemMapWrite(b *testing.B, size int) {
+	tmpDir := b.TempDir()
+	tmpFile := filepath.Join(tmpDir, "benchmark.dat")
+
+	// Create initial file
+	initialData := make([]byte, size)
+	if err := os.WriteFile(tmpFile, initialData, 0644); err != nil {
+		b.Fatal(err)
+	}
+
+	osFS, err := osfs.NewFS()
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	config := &Config{
+		Mode:     ModeReadWrite,
+		SyncMode: SyncNever, // For fair comparison
+	}
+	mfs := New(osFS, config)
+
+	data := make([]byte, 4096)
+	for i := range data {
+		data[i] = byte(i % 256)
+	}
+
+	b.ResetTimer()
+	b.SetBytes(4096)
+
+	for i := 0; i < b.N; i++ {
+		file, err := mfs.OpenFile(tmpFile, os.O_RDWR, 0644)
+		if err != nil {
+			b.Fatal(err)
+		}
+
+		_, err = file.Write(data)
+		if err != nil {
+			b.Fatal(err)
+		}
+
+		file.Close()
+	}
+}
+
+// BenchmarkWriteAt compares random write performance.
+func BenchmarkWriteAt(b *testing.B) {
+	size := 16 * 1024 * 1024 // 16 MB
+
+	b.Run("Standard", func(b *testing.B) {
+		benchmarkStandardWriteAt(b, size)
+	})
+	b.Run("MemMap", func(b *testing.B) {
+		benchmarkMemMapWriteAt(b, size)
+	})
+}
+
+func benchmarkStandardWriteAt(b *testing.B, size int) {
+	tmpDir := b.TempDir()
+	tmpFile := filepath.Join(tmpDir, "benchmark.dat")
+
+	// Create initial file
+	initialData := make([]byte, size)
+	if err := os.WriteFile(tmpFile, initialData, 0644); err != nil {
+		b.Fatal(err)
+	}
+
+	file, err := os.OpenFile(tmpFile, os.O_RDWR, 0644)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer file.Close()
+
+	data := make([]byte, 4096)
+	for i := range data {
+		data[i] = byte(i % 256)
+	}
+
+	offsets := []int64{0, 1024, 4096, 8192, 16384, 32768, 65536}
+
+	b.ResetTimer()
+	b.SetBytes(int64(len(offsets) * len(data)))
+
+	for i := 0; i < b.N; i++ {
+		for _, offset := range offsets {
+			if offset+int64(len(data)) > int64(size) {
+				continue
+			}
+			_, err := file.WriteAt(data, offset)
+			if err != nil {
+				b.Fatal(err)
+			}
+		}
+	}
+}
+
+func benchmarkMemMapWriteAt(b *testing.B, size int) {
+	tmpDir := b.TempDir()
+	tmpFile := filepath.Join(tmpDir, "benchmark.dat")
+
+	// Create initial file
+	initialData := make([]byte, size)
+	if err := os.WriteFile(tmpFile, initialData, 0644); err != nil {
+		b.Fatal(err)
+	}
+
+	osFS, err := osfs.NewFS()
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	config := &Config{
+		Mode:     ModeReadWrite,
+		SyncMode: SyncNever,
+	}
+	mfs := New(osFS, config)
+
+	file, err := mfs.OpenFile(tmpFile, os.O_RDWR, 0644)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer file.Close()
+
+	data := make([]byte, 4096)
+	for i := range data {
+		data[i] = byte(i % 256)
+	}
+
+	offsets := []int64{0, 1024, 4096, 8192, 16384, 32768, 65536}
+
+	b.ResetTimer()
+	b.SetBytes(int64(len(offsets) * len(data)))
+
+	for i := 0; i < b.N; i++ {
+		for _, offset := range offsets {
+			if offset+int64(len(data)) > int64(size) {
+				continue
+			}
+			_, err := file.WriteAt(data, offset)
+			if err != nil {
+				b.Fatal(err)
+			}
+		}
+	}
+}
+
+// BenchmarkSyncModes compares different sync strategies.
+func BenchmarkSyncModes(b *testing.B) {
+	modes := []struct {
+		name string
+		mode SyncMode
+	}{
+		{"Immediate", SyncImmediate},
+		{"Lazy", SyncLazy},
+		{"Never", SyncNever},
+	}
+
+	for _, m := range modes {
+		b.Run(m.name, func(b *testing.B) {
+			tmpDir := b.TempDir()
+			tmpFile := filepath.Join(tmpDir, "benchmark.dat")
+
+			size := 1024 * 1024 // 1 MB
+			initialData := make([]byte, size)
+			if err := os.WriteFile(tmpFile, initialData, 0644); err != nil {
+				b.Fatal(err)
+			}
+
+			osFS, err := osfs.NewFS()
+			if err != nil {
+				b.Fatal(err)
+			}
+
+			config := &Config{
+				Mode:     ModeReadWrite,
+				SyncMode: m.mode,
+			}
+			mfs := New(osFS, config)
+
+			data := make([]byte, 4096)
+			for i := range data {
+				data[i] = byte(i % 256)
+			}
+
+			b.ResetTimer()
+			b.SetBytes(4096)
+
+			for i := 0; i < b.N; i++ {
+				file, err := mfs.OpenFile(tmpFile, os.O_RDWR, 0644)
+				if err != nil {
+					b.Fatal(err)
+				}
+
+				_, err = file.Write(data)
+				if err != nil {
+					b.Fatal(err)
+				}
+
+				file.Close()
+			}
+		})
+	}
+}
