@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/absfs/absfs"
 	"github.com/absfs/osfs"
 )
 
@@ -1137,5 +1138,260 @@ func TestWindowedWriteAt(t *testing.T) {
 		if string(buf) != string(testPattern) {
 			t.Errorf("ReadAt(%d): expected %q, got %q", offset, testPattern, buf)
 		}
+	}
+}
+
+// TestPopulatePages tests MAP_POPULATE flag (Linux-specific).
+func TestPopulatePages(t *testing.T) {
+	fileSize := 1 * 1024 * 1024 // 1MB
+
+	content := make([]byte, fileSize)
+	for i := range content {
+		content[i] = byte(i % 256)
+	}
+
+	tmpFile, cleanup := createTestFile(t, string(content))
+	defer cleanup()
+
+	osFS, err := osfs.NewFS()
+	if err != nil {
+		t.Fatalf("NewFS() failed: %v", err)
+	}
+
+	config := &Config{
+		Mode:          ModeReadOnly,
+		SyncMode:      SyncNever,
+		PopulatePages: true, // Request eager page loading
+	}
+	mfs := New(osFS, config)
+
+	file, err := mfs.Open(tmpFile)
+	if err != nil {
+		t.Fatalf("Open() with PopulatePages failed: %v", err)
+	}
+	defer file.Close()
+
+	// Read some data to verify mapping works
+	buf := make([]byte, 4096)
+	n, err := file.Read(buf)
+	if err != nil && err != io.EOF {
+		t.Fatalf("Read() failed: %v", err)
+	}
+
+	if n != len(buf) {
+		t.Errorf("Expected to read %d bytes, got %d", len(buf), n)
+	}
+}
+
+// TestHugePages tests MAP_HUGETLB flag (Linux-specific).
+// This test may fail on systems without huge pages configured.
+func TestHugePages(t *testing.T) {
+	fileSize := 2 * 1024 * 1024 // 2MB (typical huge page size)
+
+	content := make([]byte, fileSize)
+	tmpFile, cleanup := createTestFile(t, string(content))
+	defer cleanup()
+
+	osFS, err := osfs.NewFS()
+	if err != nil {
+		t.Fatalf("NewFS() failed: %v", err)
+	}
+
+	config := &Config{
+		Mode:         ModeReadOnly,
+		SyncMode:     SyncNever,
+		UseHugePages: true,
+	}
+	mfs := New(osFS, config)
+
+	file, err := mfs.Open(tmpFile)
+	if err != nil {
+		// Huge pages may not be available, log but don't fail
+		t.Logf("Open() with UseHugePages failed (this is normal if huge pages aren't configured): %v", err)
+		t.Skip("Huge pages not available on this system")
+		return
+	}
+	defer file.Close()
+
+	// Try to read
+	buf := make([]byte, 1024)
+	_, err = file.Read(buf)
+	if err != nil && err != io.EOF {
+		t.Fatalf("Read() failed: %v", err)
+	}
+
+	t.Log("Huge pages test succeeded (huge pages are available)")
+}
+
+// TestMadviseHints tests various madvise hints.
+func TestMadviseHints(t *testing.T) {
+	fileSize := 1 * 1024 * 1024 // 1MB
+
+	content := make([]byte, fileSize)
+	for i := range content {
+		content[i] = byte(i % 256)
+	}
+
+	tmpFile, cleanup := createTestFile(t, string(content))
+	defer cleanup()
+
+	osFS, err := osfs.NewFS()
+	if err != nil {
+		t.Fatalf("NewFS() failed: %v", err)
+	}
+
+	mfs := New(osFS, DefaultConfig())
+
+	file, err := mfs.Open(tmpFile)
+	if err != nil {
+		t.Fatalf("Open() failed: %v", err)
+	}
+	defer file.Close()
+
+	// Get MappedFile to access madvise methods
+	mf, ok := file.(*MappedFile)
+	if !ok {
+		t.Skip("File is not a MappedFile (may be empty or directory)")
+		return
+	}
+
+	// Test various hints - these should not error
+	tests := []struct {
+		name string
+		fn   func() error
+	}{
+		{"Sequential", mf.AdviseSequential},
+		{"Random", mf.AdviseRandom},
+		{"WillNeed", mf.AdviseWillNeed},
+		{"DontNeed", mf.AdviseDontNeed},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.fn(); err != nil {
+				t.Errorf("%s failed: %v", tt.name, err)
+			}
+		})
+	}
+}
+
+// TestAdviseLinuxSpecific tests Linux-specific madvise hints.
+// These may not be available on all systems.
+func TestAdviseLinuxSpecific(t *testing.T) {
+	fileSize := 2 * 1024 * 1024 // 2MB
+
+	content := make([]byte, fileSize)
+	tmpFile, cleanup := createTestFile(t, string(content))
+	defer cleanup()
+
+	osFS, err := osfs.NewFS()
+	if err != nil {
+		t.Fatalf("NewFS() failed: %v", err)
+	}
+
+	mfs := New(osFS, DefaultConfig())
+
+	file, err := mfs.Open(tmpFile)
+	if err != nil {
+		t.Fatalf("Open() failed: %v", err)
+	}
+	defer file.Close()
+
+	mf, ok := file.(*MappedFile)
+	if !ok {
+		t.Skip("File is not a MappedFile")
+		return
+	}
+
+	// Test Linux-specific hints
+	tests := []struct {
+		name string
+		fn   func() error
+	}{
+		{"HugePage", mf.AdviseHugePage},
+		{"NoHugePage", mf.AdviseNoHugePage},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.fn(); err != nil {
+				// These may not be supported on all systems
+				t.Logf("%s returned error (may not be supported): %v", tt.name, err)
+			}
+		})
+	}
+}
+
+// TestConfigCombinations tests various configuration combinations.
+func TestConfigCombinations(t *testing.T) {
+	fileSize := 1 * 1024 * 1024
+	content := make([]byte, fileSize)
+
+	tmpFile, cleanup := createTestFile(t, string(content))
+	defer cleanup()
+
+	osFS, err := osfs.NewFS()
+	if err != nil {
+		t.Fatalf("NewFS() failed: %v", err)
+	}
+
+	configs := []struct {
+		name   string
+		config *Config
+	}{
+		{
+			name: "PopulateWithPreload",
+			config: &Config{
+				Mode:          ModeReadOnly,
+				PopulatePages: true,
+				Preload:       true,
+			},
+		},
+		{
+			name: "WindowedWithPopulate",
+			config: &Config{
+				Mode:          ModeReadOnly,
+				MapFullFile:   false,
+				WindowSize:    512 * 1024,
+				PopulatePages: true,
+			},
+		},
+		{
+			name: "ReadWriteWithSync",
+			config: &Config{
+				Mode:          ModeReadWrite,
+				SyncMode:      SyncImmediate,
+				PopulatePages: true,
+			},
+		},
+	}
+
+	for _, tc := range configs {
+		t.Run(tc.name, func(t *testing.T) {
+			mfs := New(osFS, tc.config)
+
+			var file absfs.File
+			if tc.config.Mode == ModeReadWrite {
+				file, err = mfs.OpenFile(tmpFile, os.O_RDWR, 0644)
+			} else {
+				file, err = mfs.Open(tmpFile)
+			}
+
+			if err != nil {
+				t.Fatalf("Open() failed: %v", err)
+			}
+			defer file.Close()
+
+			// Verify basic operation works
+			buf := make([]byte, 1024)
+			n, err := file.Read(buf)
+			if err != nil && err != io.EOF {
+				t.Fatalf("Read() failed: %v", err)
+			}
+
+			if n == 0 {
+				t.Error("Expected to read some bytes")
+			}
+		})
 	}
 }

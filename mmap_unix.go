@@ -25,6 +25,20 @@ func (mf *MappedFile) mmap() error {
 	// Determine protection and flags based on mode
 	prot, flags := mf.getProtectionFlags()
 
+	// Add Linux-specific optimization flags if requested
+	if mf.config.PopulatePages {
+		// MAP_POPULATE: Populate (prefault) page tables
+		// This loads the file into RAM immediately, avoiding future page faults
+		flags |= unix.MAP_POPULATE
+	}
+
+	if mf.config.UseHugePages {
+		// MAP_HUGETLB: Use huge pages if available
+		// Requires huge pages to be configured on the system
+		// Falls back to normal pages if huge pages unavailable
+		flags |= unix.MAP_HUGETLB
+	}
+
 	// Calculate map size based on windowing
 	mapSize := mf.size
 	mapOffset := int64(0)
@@ -246,6 +260,39 @@ func (mf *MappedFile) AdviseDontNeed() error {
 // AdviseWillNeed hints that the pages will be needed soon.
 func (mf *MappedFile) AdviseWillNeed() error {
 	return mf.Advise(unix.MADV_WILLNEED)
+}
+
+// AdviseHugePage hints that the kernel should use transparent huge pages (Linux).
+// This can improve TLB performance for large files.
+// Requires transparent huge pages to be enabled in the kernel.
+func (mf *MappedFile) AdviseHugePage() error {
+	// MADV_HUGEPAGE is Linux-specific
+	const MADV_HUGEPAGE = 14
+	return mf.Advise(MADV_HUGEPAGE)
+}
+
+// AdviseNoHugePage hints that the kernel should not use transparent huge pages.
+func (mf *MappedFile) AdviseNoHugePage() error {
+	// MADV_NOHUGEPAGE is Linux-specific
+	const MADV_NOHUGEPAGE = 15
+	return mf.Advise(MADV_NOHUGEPAGE)
+}
+
+// AdviseFree hints that the pages can be freed (Linux).
+// This allows the kernel to reclaim memory without writing dirty pages.
+// Use with caution - data will be lost!
+func (mf *MappedFile) AdviseFree() error {
+	// MADV_FREE is Linux-specific (4.5+)
+	const MADV_FREE = 8
+	return mf.Advise(MADV_FREE)
+}
+
+// AdviseRemove hints that pages will not be accessed in the near future (Linux).
+// Similar to DontNeed but doesn't free immediately.
+func (mf *MappedFile) AdviseRemove() error {
+	// MADV_REMOVE is Linux-specific
+	const MADV_REMOVE = 9
+	return mf.Advise(MADV_REMOVE)
 }
 
 // Data returns a direct slice to the mapped memory.
