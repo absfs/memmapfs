@@ -1,4 +1,4 @@
-//go:build unix || darwin || linux
+//go:build freebsd || netbsd || openbsd || dragonfly
 
 package memmapfs
 
@@ -25,19 +25,9 @@ func (mf *MappedFile) mmap() error {
 	// Determine protection and flags based on mode
 	prot, flags := mf.getProtectionFlags()
 
-	// Add Linux-specific optimization flags if requested
-	if mf.config.PopulatePages {
-		// MAP_POPULATE: Populate (prefault) page tables
-		// This loads the file into RAM immediately, avoiding future page faults
-		flags |= unix.MAP_POPULATE
-	}
-
-	if mf.config.UseHugePages {
-		// MAP_HUGETLB: Use huge pages if available
-		// Requires huge pages to be configured on the system
-		// Falls back to normal pages if huge pages unavailable
-		flags |= unix.MAP_HUGETLB
-	}
+	// Note: PopulatePages and UseHugePages are handled differently on BSD.
+	// FreeBSD has MAP_PREFAULT_READ, other BSDs use madvise.
+	// UseHugePages has no direct equivalent on BSDs.
 
 	// Calculate map size based on windowing
 	mapSize := mf.size
@@ -76,6 +66,13 @@ func (mf *MappedFile) mmap() error {
 		mf.data = data[offsetDiff:]
 	} else {
 		mf.data = data
+	}
+
+	// On BSD, if PopulatePages was requested, use madvise(MADV_WILLNEED)
+	// as an alternative to Linux's MAP_POPULATE
+	if mf.config.PopulatePages {
+		// MADV_WILLNEED hints to the kernel to prefetch the pages
+		_ = unix.Madvise(mf.mmapData, unix.MADV_WILLNEED)
 	}
 
 	return nil
@@ -126,14 +123,8 @@ func (mf *MappedFile) preload() error {
 		return nil
 	}
 
-	advice := unix.MADV_WILLNEED
-	if mf.config.PreloadAsync {
-		// MADV_WILLNEED is already async on most systems
-		advice = unix.MADV_WILLNEED
-	}
-
 	// Use the original mmap'd slice for madvise
-	if err := unix.Madvise(mf.mmapData, advice); err != nil {
+	if err := unix.Madvise(mf.mmapData, unix.MADV_WILLNEED); err != nil {
 		return fmt.Errorf("madvise failed: %w", err)
 	}
 
@@ -262,37 +253,30 @@ func (mf *MappedFile) AdviseWillNeed() error {
 	return mf.Advise(unix.MADV_WILLNEED)
 }
 
-// AdviseHugePage hints that the kernel should use transparent huge pages (Linux).
-// This can improve TLB performance for large files.
-// Requires transparent huge pages to be enabled in the kernel.
+// AdviseHugePage is a no-op on BSD.
+// BSD systems do not have explicit huge page APIs.
 func (mf *MappedFile) AdviseHugePage() error {
-	// MADV_HUGEPAGE is Linux-specific
-	const MADV_HUGEPAGE = 14
-	return mf.Advise(MADV_HUGEPAGE)
+	// No-op on BSD
+	return nil
 }
 
-// AdviseNoHugePage hints that the kernel should not use transparent huge pages.
+// AdviseNoHugePage is a no-op on BSD.
+// BSD systems do not have explicit huge page APIs.
 func (mf *MappedFile) AdviseNoHugePage() error {
-	// MADV_NOHUGEPAGE is Linux-specific
-	const MADV_NOHUGEPAGE = 15
-	return mf.Advise(MADV_NOHUGEPAGE)
+	// No-op on BSD
+	return nil
 }
 
-// AdviseFree hints that the pages can be freed (Linux).
-// This allows the kernel to reclaim memory without writing dirty pages.
-// Use with caution - data will be lost!
+// AdviseFree hints that the pages can be freed.
+// On BSD, this uses MADV_FREE which is available on most BSD variants.
 func (mf *MappedFile) AdviseFree() error {
-	// MADV_FREE is Linux-specific (4.5+)
-	const MADV_FREE = 8
-	return mf.Advise(MADV_FREE)
+	return mf.Advise(unix.MADV_FREE)
 }
 
-// AdviseRemove hints that pages will not be accessed in the near future (Linux).
-// Similar to DontNeed but doesn't free immediately.
+// AdviseRemove is a no-op on BSD as this advice is Linux-specific.
 func (mf *MappedFile) AdviseRemove() error {
-	// MADV_REMOVE is Linux-specific
-	const MADV_REMOVE = 9
-	return mf.Advise(MADV_REMOVE)
+	// No equivalent on BSD, use MADV_DONTNEED as closest alternative
+	return mf.Advise(unix.MADV_DONTNEED)
 }
 
 // Data returns a direct slice to the mapped memory.

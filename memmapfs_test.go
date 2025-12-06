@@ -1,6 +1,7 @@
 package memmapfs
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -1319,6 +1320,672 @@ func TestAdviseLinuxSpecific(t *testing.T) {
 				t.Logf("%s returned error (may not be supported): %v", tt.name, err)
 			}
 		})
+	}
+}
+
+// TestSeekErrors tests error cases for Seek.
+func TestSeekErrors(t *testing.T) {
+	testContent := "Hello, memmapfs!"
+	tmpFile, cleanup := createTestFile(t, testContent)
+	defer cleanup()
+
+	osFS, err := osfs.NewFS()
+	if err != nil {
+		t.Fatalf("NewFS() failed: %v", err)
+	}
+	mfs := New(osFS, DefaultConfig())
+
+	file, err := mfs.Open(tmpFile)
+	if err != nil {
+		t.Fatalf("Open() failed: %v", err)
+	}
+	defer file.Close()
+
+	// Test invalid whence
+	_, err = file.Seek(0, 999)
+	if err != ErrInvalidWhence {
+		t.Errorf("Expected ErrInvalidWhence for invalid whence, got %v", err)
+	}
+
+	// Test negative position
+	_, err = file.Seek(-100, 0)
+	if err != ErrInvalidOffset {
+		t.Errorf("Expected ErrInvalidOffset for negative position, got %v", err)
+	}
+}
+
+// TestReadAtErrors tests error cases for ReadAt.
+func TestReadAtErrors(t *testing.T) {
+	testContent := "Hello, memmapfs!"
+	tmpFile, cleanup := createTestFile(t, testContent)
+	defer cleanup()
+
+	osFS, err := osfs.NewFS()
+	if err != nil {
+		t.Fatalf("NewFS() failed: %v", err)
+	}
+	mfs := New(osFS, DefaultConfig())
+
+	file, err := mfs.Open(tmpFile)
+	if err != nil {
+		t.Fatalf("Open() failed: %v", err)
+	}
+	defer file.Close()
+
+	// Test negative offset
+	buf := make([]byte, 10)
+	_, err = file.ReadAt(buf, -1)
+	if err != ErrInvalidOffset {
+		t.Errorf("Expected ErrInvalidOffset for negative offset, got %v", err)
+	}
+
+	// Test offset beyond file
+	_, err = file.ReadAt(buf, int64(len(testContent)+10))
+	if err != ErrInvalidOffset {
+		t.Errorf("Expected ErrInvalidOffset for offset beyond file, got %v", err)
+	}
+}
+
+// TestWriteAtErrors tests error cases for WriteAt.
+func TestWriteAtErrors(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "testfile.txt")
+	initialContent := "Hello, memmapfs!"
+
+	if err := os.WriteFile(tmpFile, []byte(initialContent), 0644); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	osFS, err := osfs.NewFS()
+	if err != nil {
+		t.Fatalf("NewFS() failed: %v", err)
+	}
+	config := &Config{
+		Mode:     ModeReadWrite,
+		SyncMode: SyncNever,
+	}
+	mfs := New(osFS, config)
+
+	file, err := mfs.OpenFile(tmpFile, os.O_RDWR, 0644)
+	if err != nil {
+		t.Fatalf("OpenFile() failed: %v", err)
+	}
+	defer file.Close()
+
+	// Test negative offset
+	_, err = file.WriteAt([]byte("test"), -1)
+	if err != ErrInvalidOffset {
+		t.Errorf("Expected ErrInvalidOffset for negative offset, got %v", err)
+	}
+
+	// Test offset beyond file
+	_, err = file.WriteAt([]byte("test"), int64(len(initialContent)+10))
+	if err != ErrInvalidOffset {
+		t.Errorf("Expected ErrInvalidOffset for offset beyond file, got %v", err)
+	}
+}
+
+// TestWriteAtToReadOnly tests WriteAt on read-only mapping.
+func TestWriteAtToReadOnly(t *testing.T) {
+	testContent := "Hello, memmapfs!"
+	tmpFile, cleanup := createTestFile(t, testContent)
+	defer cleanup()
+
+	osFS, err := osfs.NewFS()
+	if err != nil {
+		t.Fatalf("NewFS() failed: %v", err)
+	}
+	config := &Config{
+		Mode: ModeReadOnly,
+	}
+	mfs := New(osFS, config)
+
+	file, err := mfs.Open(tmpFile)
+	if err != nil {
+		t.Fatalf("Open() failed: %v", err)
+	}
+	defer file.Close()
+
+	// Attempt to WriteAt should fail
+	_, err = file.WriteAt([]byte("test"), 0)
+	if err != ErrWriteToReadOnlyMap {
+		t.Errorf("Expected ErrWriteToReadOnlyMap, got %v", err)
+	}
+}
+
+// TestTruncateMappedFile tests that truncating a mapped file fails.
+func TestTruncateMappedFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "testfile.txt")
+	content := "Hello, memmapfs!"
+
+	if err := os.WriteFile(tmpFile, []byte(content), 0644); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	osFS, err := osfs.NewFS()
+	if err != nil {
+		t.Fatalf("NewFS() failed: %v", err)
+	}
+	mfs := New(osFS, DefaultConfig())
+
+	file, err := mfs.Open(tmpFile)
+	if err != nil {
+		t.Fatalf("Open() failed: %v", err)
+	}
+	defer file.Close()
+
+	// Truncate should fail on mapped file
+	err = file.Truncate(5)
+	if err == nil {
+		t.Error("Expected error when truncating mapped file")
+	}
+}
+
+// TestReaddirAndReaddirnames tests directory operations.
+func TestReaddirAndReaddirnames(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create some test files in the directory
+	for i := 0; i < 3; i++ {
+		fileName := filepath.Join(tmpDir, fmt.Sprintf("file%d.txt", i))
+		if err := os.WriteFile(fileName, []byte("test"), 0644); err != nil {
+			t.Fatalf("Failed to create test file: %v", err)
+		}
+	}
+
+	osFS, err := osfs.NewFS()
+	if err != nil {
+		t.Fatalf("NewFS() failed: %v", err)
+	}
+	mfs := New(osFS, DefaultConfig())
+
+	// Open directory
+	dir, err := mfs.Open(tmpDir)
+	if err != nil {
+		t.Fatalf("Open() failed: %v", err)
+	}
+	defer dir.Close()
+
+	// Test Readdir
+	infos, err := dir.Readdir(-1)
+	if err != nil {
+		t.Fatalf("Readdir() failed: %v", err)
+	}
+	if len(infos) != 3 {
+		t.Errorf("Expected 3 entries, got %d", len(infos))
+	}
+
+	// Reopen directory for Readdirnames
+	dir2, err := mfs.Open(tmpDir)
+	if err != nil {
+		t.Fatalf("Open() failed: %v", err)
+	}
+	defer dir2.Close()
+
+	// Test Readdirnames
+	names, err := dir2.Readdirnames(-1)
+	if err != nil {
+		t.Fatalf("Readdirnames() failed: %v", err)
+	}
+	if len(names) != 3 {
+		t.Errorf("Expected 3 names, got %d", len(names))
+	}
+}
+
+// TestAdviseFreeAndRemove tests AdviseFree and AdviseRemove.
+func TestAdviseFreeAndRemove(t *testing.T) {
+	fileSize := 1 * 1024 * 1024
+	content := make([]byte, fileSize)
+	for i := range content {
+		content[i] = byte(i % 256)
+	}
+
+	tmpFile, cleanup := createTestFile(t, string(content))
+	defer cleanup()
+
+	osFS, err := osfs.NewFS()
+	if err != nil {
+		t.Fatalf("NewFS() failed: %v", err)
+	}
+
+	mfs := New(osFS, DefaultConfig())
+
+	file, err := mfs.Open(tmpFile)
+	if err != nil {
+		t.Fatalf("Open() failed: %v", err)
+	}
+	defer file.Close()
+
+	mf, ok := file.(*MappedFile)
+	if !ok {
+		t.Skip("File is not a MappedFile")
+		return
+	}
+
+	// Test AdviseFree - may not be supported on all systems
+	err = mf.AdviseFree()
+	if err != nil {
+		t.Logf("AdviseFree returned error (may not be supported): %v", err)
+	}
+
+	// Test AdviseRemove - may not be supported on all systems
+	err = mf.AdviseRemove()
+	if err != nil {
+		t.Logf("AdviseRemove returned error (may not be supported): %v", err)
+	}
+}
+
+// TestSharedMemoryHelpers tests SharedMemory helper methods.
+func TestSharedMemoryHelpers(t *testing.T) {
+	tmpDir := t.TempDir()
+	sharedPath := filepath.Join(tmpDir, "shared.dat")
+
+	config := &SharedMemoryConfig{
+		Path:        sharedPath,
+		Size:        1024,
+		Mode:        ModeReadWrite,
+		Permissions: 0644,
+	}
+
+	sm, err := CreateSharedMemory(config)
+	if err != nil {
+		t.Fatalf("CreateSharedMemory() failed: %v", err)
+	}
+	defer sm.Remove()
+
+	// Test Path()
+	if sm.Path() != sharedPath {
+		t.Errorf("Path() = %q, want %q", sm.Path(), sharedPath)
+	}
+
+	// Test MappedFile()
+	mf := sm.MappedFile()
+	if mf == nil {
+		t.Error("MappedFile() returned nil")
+	}
+
+	// Test that we can use the MappedFile
+	data := mf.Data()
+	if len(data) == 0 {
+		t.Error("MappedFile().Data() returned empty slice")
+	}
+}
+
+// TestSharedMemoryErrors tests error cases for SharedMemory.
+func TestSharedMemoryErrors(t *testing.T) {
+	// Test empty path
+	config := &SharedMemoryConfig{
+		Path: "",
+		Size: 1024,
+	}
+	_, err := CreateSharedMemory(config)
+	if err == nil {
+		t.Error("Expected error for empty path")
+	}
+
+	// Test zero size
+	config = &SharedMemoryConfig{
+		Path: "/tmp/test.dat",
+		Size: 0,
+	}
+	_, err = CreateSharedMemory(config)
+	if err == nil {
+		t.Error("Expected error for zero size")
+	}
+
+	// Test negative size
+	config = &SharedMemoryConfig{
+		Path: "/tmp/test.dat",
+		Size: -1,
+	}
+	_, err = CreateSharedMemory(config)
+	if err == nil {
+		t.Error("Expected error for negative size")
+	}
+}
+
+// TestOpenSharedMemoryNotFound tests OpenSharedMemory with non-existent file.
+func TestOpenSharedMemoryNotFound(t *testing.T) {
+	_, err := OpenSharedMemory("/nonexistent/path/to/file.dat", false)
+	if err == nil {
+		t.Error("Expected error for non-existent file")
+	}
+}
+
+// TestCheckTruncation tests the checkTruncation method.
+func TestCheckTruncation(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "testfile.txt")
+	content := "Hello, memmapfs!"
+
+	if err := os.WriteFile(tmpFile, []byte(content), 0644); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	osFS, err := osfs.NewFS()
+	if err != nil {
+		t.Fatalf("NewFS() failed: %v", err)
+	}
+	mfs := New(osFS, DefaultConfig())
+
+	file, err := mfs.Open(tmpFile)
+	if err != nil {
+		t.Fatalf("Open() failed: %v", err)
+	}
+
+	mf, ok := file.(*MappedFile)
+	if !ok {
+		t.Fatal("File is not a MappedFile")
+	}
+
+	// Before truncation
+	truncated, err := mf.checkTruncation()
+	if err != nil {
+		t.Fatalf("checkTruncation() failed: %v", err)
+	}
+	if truncated {
+		t.Error("File should not be detected as truncated before truncation")
+	}
+
+	// Close the mapped file before truncating
+	file.Close()
+}
+
+// TestFilesystemMethods tests various MemMapFS methods.
+func TestFilesystemMethods(t *testing.T) {
+	osFS, err := osfs.NewFS()
+	if err != nil {
+		t.Fatalf("NewFS() failed: %v", err)
+	}
+	mfs := New(osFS, DefaultConfig())
+
+	tmpDir := t.TempDir()
+
+	// Test Separator
+	sep := mfs.Separator()
+	if sep != filepath.Separator {
+		t.Errorf("Separator() = %c, want %c", sep, filepath.Separator)
+	}
+
+	// Test ListSeparator
+	listSep := mfs.ListSeparator()
+	if listSep != filepath.ListSeparator {
+		t.Errorf("ListSeparator() = %c, want %c", listSep, filepath.ListSeparator)
+	}
+
+	// Test TempDir
+	tempDir := mfs.TempDir()
+	if tempDir == "" {
+		t.Error("TempDir() returned empty string")
+	}
+
+	// Test Mkdir
+	newDir := filepath.Join(tmpDir, "newdir")
+	err = mfs.Mkdir(newDir, 0755)
+	if err != nil {
+		t.Fatalf("Mkdir() failed: %v", err)
+	}
+
+	// Test MkdirAll
+	deepDir := filepath.Join(tmpDir, "a", "b", "c")
+	err = mfs.MkdirAll(deepDir, 0755)
+	if err != nil {
+		t.Fatalf("MkdirAll() failed: %v", err)
+	}
+
+	// Test Create
+	newFile := filepath.Join(tmpDir, "created.txt")
+	f, err := mfs.Create(newFile)
+	if err != nil {
+		t.Fatalf("Create() failed: %v", err)
+	}
+	f.Close()
+
+	// Test Stat
+	fi, err := mfs.Stat(newFile)
+	if err != nil {
+		t.Fatalf("Stat() failed: %v", err)
+	}
+	if fi.IsDir() {
+		t.Error("Created file should not be a directory")
+	}
+
+	// Test Chmod
+	err = mfs.Chmod(newFile, 0600)
+	if err != nil {
+		t.Fatalf("Chmod() failed: %v", err)
+	}
+
+	// Test Chtimes
+	now := time.Now()
+	err = mfs.Chtimes(newFile, now, now)
+	if err != nil {
+		t.Fatalf("Chtimes() failed: %v", err)
+	}
+
+	// Test Truncate
+	err = mfs.Truncate(newFile, 0)
+	if err != nil {
+		t.Fatalf("Truncate() failed: %v", err)
+	}
+
+	// Test Rename
+	renamedFile := filepath.Join(tmpDir, "renamed.txt")
+	err = mfs.Rename(newFile, renamedFile)
+	if err != nil {
+		t.Fatalf("Rename() failed: %v", err)
+	}
+
+	// Test Remove
+	err = mfs.Remove(renamedFile)
+	if err != nil {
+		t.Fatalf("Remove() failed: %v", err)
+	}
+
+	// Test RemoveAll
+	err = mfs.RemoveAll(deepDir)
+	if err != nil {
+		t.Fatalf("RemoveAll() failed: %v", err)
+	}
+
+	// Test Getwd and Chdir
+	origWd, err := mfs.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd() failed: %v", err)
+	}
+	if origWd == "" {
+		t.Error("Getwd() returned empty string")
+	}
+}
+
+// TestSIGBUSHandler tests SIGBUS handler registration.
+func TestSIGBUSHandler(t *testing.T) {
+	handler := GetSIGBUSHandler()
+	if handler == nil {
+		t.Fatal("GetSIGBUSHandler() returned nil")
+	}
+
+	// Create a test file
+	tmpFile, cleanup := createTestFile(t, "test content")
+	defer cleanup()
+
+	osFS, err := osfs.NewFS()
+	if err != nil {
+		t.Fatalf("NewFS() failed: %v", err)
+	}
+	mfs := New(osFS, DefaultConfig())
+
+	file, err := mfs.Open(tmpFile)
+	if err != nil {
+		t.Fatalf("Open() failed: %v", err)
+	}
+
+	mf, ok := file.(*MappedFile)
+	if !ok {
+		t.Fatal("File is not a MappedFile")
+	}
+
+	// Enable SIGBUS protection
+	mf.EnableSIGBUSProtection()
+
+	// Register a handler
+	handler.OnSIGBUS(func(mappedFile *MappedFile, err error) {
+		// Handler registered
+	})
+
+	// Disable protection
+	mf.DisableSIGBUSProtection()
+
+	file.Close()
+}
+
+// TestWriteBeyondFileSize tests writing beyond file size.
+func TestWriteBeyondFileSize(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "testfile.txt")
+	content := "Hello"
+
+	if err := os.WriteFile(tmpFile, []byte(content), 0644); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	osFS, err := osfs.NewFS()
+	if err != nil {
+		t.Fatalf("NewFS() failed: %v", err)
+	}
+	config := &Config{
+		Mode:     ModeReadWrite,
+		SyncMode: SyncNever,
+	}
+	mfs := New(osFS, config)
+
+	file, err := mfs.OpenFile(tmpFile, os.O_RDWR, 0644)
+	if err != nil {
+		t.Fatalf("OpenFile() failed: %v", err)
+	}
+	defer file.Close()
+
+	// Try to write more than file size
+	largeData := make([]byte, 100)
+	_, err = file.Write(largeData)
+	if err != io.ErrShortWrite {
+		t.Errorf("Expected io.ErrShortWrite, got %v", err)
+	}
+}
+
+// TestPreloadOptions tests preload functionality.
+func TestPreloadOptions(t *testing.T) {
+	fileSize := 1 * 1024 * 1024
+	content := make([]byte, fileSize)
+	for i := range content {
+		content[i] = byte(i % 256)
+	}
+
+	tmpFile, cleanup := createTestFile(t, string(content))
+	defer cleanup()
+
+	osFS, err := osfs.NewFS()
+	if err != nil {
+		t.Fatalf("NewFS() failed: %v", err)
+	}
+
+	// Test with Preload enabled
+	config := &Config{
+		Mode:         ModeReadOnly,
+		SyncMode:     SyncNever,
+		Preload:      true,
+		PreloadAsync: true,
+	}
+	mfs := New(osFS, config)
+
+	file, err := mfs.Open(tmpFile)
+	if err != nil {
+		t.Fatalf("Open() with Preload failed: %v", err)
+	}
+	defer file.Close()
+
+	// Read some data to verify mapping works
+	buf := make([]byte, 4096)
+	n, err := file.Read(buf)
+	if err != nil && err != io.EOF {
+		t.Fatalf("Read() failed: %v", err)
+	}
+
+	if n != len(buf) {
+		t.Errorf("Expected to read %d bytes, got %d", len(buf), n)
+	}
+}
+
+// TestSyncOnClose tests that sync is called on close for modified files.
+func TestSyncOnClose(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "testfile.txt")
+	initialContent := "Initial content!!!!"
+
+	if err := os.WriteFile(tmpFile, []byte(initialContent), 0644); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	osFS, err := osfs.NewFS()
+	if err != nil {
+		t.Fatalf("NewFS() failed: %v", err)
+	}
+
+	config := &Config{
+		Mode:     ModeReadWrite,
+		SyncMode: SyncLazy, // Lazy sync - should sync on close
+	}
+	mfs := New(osFS, config)
+
+	file, err := mfs.OpenFile(tmpFile, os.O_RDWR, 0644)
+	if err != nil {
+		t.Fatalf("OpenFile() failed: %v", err)
+	}
+
+	// Write new content
+	newContent := "Modified content!"
+	_, err = file.Write([]byte(newContent))
+	if err != nil {
+		t.Fatalf("Write() failed: %v", err)
+	}
+
+	// Close should sync
+	file.Close()
+
+	// Verify persistence by reading with standard I/O
+	data, err := os.ReadFile(tmpFile)
+	if err != nil {
+		t.Fatalf("ReadFile() failed: %v", err)
+	}
+
+	if string(data[:len(newContent)]) != newContent {
+		t.Errorf("Expected persisted content %q, got %q", newContent, string(data))
+	}
+}
+
+// TestSyncOnReadOnlyFile tests that sync is a no-op for read-only files.
+func TestSyncOnReadOnlyFile(t *testing.T) {
+	testContent := "Hello, memmapfs!"
+	tmpFile, cleanup := createTestFile(t, testContent)
+	defer cleanup()
+
+	osFS, err := osfs.NewFS()
+	if err != nil {
+		t.Fatalf("NewFS() failed: %v", err)
+	}
+	mfs := New(osFS, DefaultConfig())
+
+	file, err := mfs.Open(tmpFile)
+	if err != nil {
+		t.Fatalf("Open() failed: %v", err)
+	}
+	defer file.Close()
+
+	// Sync on read-only should succeed (no-op)
+	err = file.Sync()
+	if err != nil {
+		t.Errorf("Sync() on read-only file failed: %v", err)
 	}
 }
 
