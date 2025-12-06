@@ -32,3 +32,8 @@ Thumbs.db
 coverage.txt
 coverage.html
 *.prof
+
+# Claude Code
+.claude/
+CLAUDE.md
+.project_meta/
