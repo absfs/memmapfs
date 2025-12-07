@@ -42,9 +42,9 @@ func (mf *MappedFile) mmap() error {
 	}
 
 	// Windows requires page alignment (typically 64KB allocation granularity)
-	var si syscall.SystemInfo
-	syscall.GetSystemInfo(&si)
-	allocGranularity := int64(si.AllocationGranularity)
+	// Use a fixed 64KB allocation granularity which is standard for Windows
+	// This avoids needing platform-specific syscalls for GetSystemInfo
+	const allocGranularity = 64 * 1024 // 64KB
 
 	// Align offset to allocation granularity
 	alignedOffset := (mapOffset / allocGranularity) * allocGranularity
