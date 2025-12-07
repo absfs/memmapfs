@@ -35,3 +35,9 @@ func (mf *MappedFile) DisableSIGBUSProtection() {}
 func (mf *MappedFile) RemapAfterTruncation() error {
 	return nil
 }
+
+// checkTruncation checks if the file has been truncated.
+// This is a no-op on Windows (Phase 1).
+func (mf *MappedFile) checkTruncation() (bool, error) {
+	return false, nil
+}
