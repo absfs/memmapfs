@@ -1,5 +1,10 @@
 # memmapfs
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/absfs/memmapfs.svg)](https://pkg.go.dev/github.com/absfs/memmapfs)
+[![Go Report Card](https://goreportcard.com/badge/github.com/absfs/memmapfs)](https://goreportcard.com/report/github.com/absfs/memmapfs)
+[![CI](https://github.com/absfs/memmapfs/actions/workflows/ci.yml/badge.svg)](https://github.com/absfs/memmapfs/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Memory-mapped file wrapper for absfs with zero-copy I/O and efficient random access.
 
 ## Overview and Purpose
