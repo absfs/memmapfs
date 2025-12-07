@@ -34,3 +34,57 @@ func (mf *MappedFile) preload() error {
 func (mf *MappedFile) Data() []byte {
 	return nil
 }
+
+// Advise provides access pattern hints to the kernel.
+// This is a no-op on Windows (Phase 1).
+func (mf *MappedFile) Advise(advice int) error {
+	return nil
+}
+
+// AdviseSequential hints that the file will be accessed sequentially.
+// This is a no-op on Windows (Phase 1).
+func (mf *MappedFile) AdviseSequential() error {
+	return nil
+}
+
+// AdviseRandom hints that the file will be accessed randomly.
+// This is a no-op on Windows (Phase 1).
+func (mf *MappedFile) AdviseRandom() error {
+	return nil
+}
+
+// AdviseDontNeed hints that the pages won't be needed soon and can be evicted.
+// This is a no-op on Windows (Phase 1).
+func (mf *MappedFile) AdviseDontNeed() error {
+	return nil
+}
+
+// AdviseWillNeed hints that the pages will be needed soon.
+// This is a no-op on Windows (Phase 1).
+func (mf *MappedFile) AdviseWillNeed() error {
+	return nil
+}
+
+// AdviseHugePage hints that the kernel should use transparent huge pages.
+// This is a no-op on Windows (Phase 1).
+func (mf *MappedFile) AdviseHugePage() error {
+	return nil
+}
+
+// AdviseNoHugePage hints that the kernel should not use transparent huge pages.
+// This is a no-op on Windows (Phase 1).
+func (mf *MappedFile) AdviseNoHugePage() error {
+	return nil
+}
+
+// AdviseFree hints that the pages can be freed.
+// This is a no-op on Windows (Phase 1).
+func (mf *MappedFile) AdviseFree() error {
+	return nil
+}
+
+// AdviseRemove hints that pages will not be accessed in the near future.
+// This is a no-op on Windows (Phase 1).
+func (mf *MappedFile) AdviseRemove() error {
+	return nil
+}
