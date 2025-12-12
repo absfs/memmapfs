@@ -397,6 +397,11 @@ func (mf *MappedFile) Readdirnames(n int) ([]string, error) {
 	return mf.file.Readdirnames(n)
 }
 
+// ReadDir reads the contents of the directory and returns a slice of DirEntry values.
+func (mf *MappedFile) ReadDir(n int) ([]fs.DirEntry, error) {
+	return mf.file.ReadDir(n)
+}
+
 // WriteString writes a string to the file.
 func (mf *MappedFile) WriteString(s string) (int, error) {
 	return mf.Write([]byte(s))

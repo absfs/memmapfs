@@ -1702,18 +1702,6 @@ func TestFilesystemMethods(t *testing.T) {
 
 	tmpDir := t.TempDir()
 
-	// Test Separator
-	sep := mfs.Separator()
-	if sep != filepath.Separator {
-		t.Errorf("Separator() = %c, want %c", sep, filepath.Separator)
-	}
-
-	// Test ListSeparator
-	listSep := mfs.ListSeparator()
-	if listSep != filepath.ListSeparator {
-		t.Errorf("ListSeparator() = %c, want %c", listSep, filepath.ListSeparator)
-	}
-
 	// Test TempDir
 	tempDir := mfs.TempDir()
 	if tempDir == "" {

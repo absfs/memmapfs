@@ -3,6 +3,7 @@ package memmapfs
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"time"
 
@@ -207,16 +208,6 @@ func (mfs *MemMapFS) Truncate(name string, size int64) error {
 	return mfs.underlying.Truncate(name, size)
 }
 
-// Separator returns the path separator for this filesystem.
-func (mfs *MemMapFS) Separator() uint8 {
-	return mfs.underlying.Separator()
-}
-
-// ListSeparator returns the list separator for this filesystem.
-func (mfs *MemMapFS) ListSeparator() uint8 {
-	return mfs.underlying.ListSeparator()
-}
-
 // Chdir changes the current working directory.
 func (mfs *MemMapFS) Chdir(dir string) error {
 	return mfs.underlying.Chdir(dir)
@@ -230,6 +221,21 @@ func (mfs *MemMapFS) Getwd() (string, error) {
 // TempDir returns the temporary directory.
 func (mfs *MemMapFS) TempDir() string {
 	return mfs.underlying.TempDir()
+}
+
+// ReadDir reads the named directory and returns a list of directory entries.
+func (mfs *MemMapFS) ReadDir(name string) ([]fs.DirEntry, error) {
+	return mfs.underlying.ReadDir(name)
+}
+
+// ReadFile reads the named file and returns its contents.
+func (mfs *MemMapFS) ReadFile(name string) ([]byte, error) {
+	return mfs.underlying.ReadFile(name)
+}
+
+// Sub returns a Filer corresponding to the subtree rooted at dir.
+func (mfs *MemMapFS) Sub(dir string) (fs.FS, error) {
+	return absfs.FilerToFS(mfs.underlying, dir)
 }
 
 // Ensure MemMapFS implements absfs.FileSystem
